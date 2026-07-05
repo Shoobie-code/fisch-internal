@@ -91,6 +91,27 @@ local function doCast()
     end
 end
 
+-- DIAGNOSTIC: pops an on-screen message with exactly what the cast finds.
+local function castTest()
+    local function say(m)
+        warn("[Fisch] " .. m)
+        pcall(function() game.StarterGui:SetCore("SendNotification", { Title = "Fisch cast test", Text = m, Duration = 8 }) end)
+    end
+    local rod = getRod()
+    if not rod then say("NO rod detected in your character. Is a rod equipped?"); return end
+    local e  = rod:FindFirstChild("events")
+    local ca = e and e:FindFirstChild("castAsync")
+    local c  = e and e:FindFirstChild("cast")
+    local remote = ca or c
+    if not remote then say("rod=" .. rod.Name .. " but events has NO cast/castAsync"); return end
+    say(("rod=%s cast=%s(%s) pow=%d type=%d - firing"):format(rod.Name, remote.Name, remote.ClassName, CFG.castPower, CFG.castType))
+    if remote:IsA("RemoteFunction") then
+        task.spawn(function() pcall(function() remote:InvokeServer(CFG.castPower, CFG.castType) end) end)
+    else
+        pcall(function() remote:FireServer(CFG.castPower, CFG.castType) end)
+    end
+end
+
 -- LEGIT reel: play the minigame by keeping the player bar on the fish, and let the
 -- game complete it naturally. NO forged completion remote — firing catchfinish/
 -- reelfinished to auto-win is the BLATANT path that got the account banned.
@@ -122,8 +143,9 @@ end
 
 ----------------------------------------------------------------- main loop
 -- Heartbeat = smooth per-frame reel tracking; cast/shake are throttled.
+if _G.__FischConn then pcall(function() _G.__FischConn:Disconnect() end) end   -- kill any prior run's loop
 local _lastCast, _lastShake = 0, 0
-RunService.Heartbeat:Connect(function()
+_G.__FischConn = RunService.Heartbeat:Connect(function()
     if not CFG.autoFish then return end
     pcall(function()
         local pg = plr:FindFirstChildOfClass("PlayerGui")
@@ -277,7 +299,7 @@ if okUI and Rayfield then
     Fishing:CreateToggle({ Name = "Auto Fish", CurrentValue = false, Flag = "AutoFish", Callback = function(v) CFG.autoFish = v end })
     Fishing:CreateToggle({ Name = "Auto-equip rod", CurrentValue = true, Callback = function(v) CFG.autoEquip = v end })
     Fishing:CreateSlider({ Name = "Cast type (try 1 or 2)", Range = { 1, 2 }, Increment = 1, CurrentValue = 1, Callback = function(v) CFG.castType = v end })
-    Fishing:CreateButton({ Name = "Cast now (test)", Callback = function() doCast() end })
+    Fishing:CreateButton({ Name = "Cast now (test)", Callback = function() castTest() end })
     local statusLbl = Fishing:CreateLabel("status: idle")
     task.spawn(function()
         while true do task.wait(0.5)
