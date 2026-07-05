@@ -111,15 +111,13 @@ local function doShake(sui)
     if not sz then return end
     local btn = sz:FindFirstChild("button") or sz:FindFirstChildWhichIsA("ImageButton") or sz:FindFirstChildWhichIsA("TextButton")
     if not btn then return end
-    pcall(function()
-        btn.Size = UDim2.new(0, 2000, 0, 2000)               -- huge hitbox (center-shake helper)
-        btn.Position = UDim2.fromScale(0.5, 0.5)
-        btn.AnchorPoint = Vector2.new(0.5, 0.5)
-    end)
+    -- click the shake button for you — NO resizing, NO screen-covering.
+    if type(firesignal) == "function" then
+        pcall(firesignal, btn.MouseButton1Click)              -- runs the button's own click handler
+        pcall(firesignal, btn.Activated, nil, 1)
+    end
     if type(replicatesignal) == "function" then
-        pcall(replicatesignal, btn.MouseButton1Click)         -- registers server-side, no input
-    elseif type(firesignal) == "function" then
-        pcall(firesignal, btn.MouseButton1Click)
+        pcall(replicatesignal, btn.MouseButton1Click)
     end
 end
 
