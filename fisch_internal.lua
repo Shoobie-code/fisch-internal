@@ -29,8 +29,7 @@ local CFG = {
     autoFish      = false,
     autoEquip     = true,
     reelMode      = "hybrid",   -- "spam" | "predict" | "hybrid"
-    castThreshold = 99,         -- release when power >= this (near max = perfect cast)
-    castMaxHold   = 3.0,        -- ...or after this many seconds (safety only)
+    chargeTime    = 1.0,        -- hold this long to charge, then let go. tune until it's a Perfect Cast.
     autoSell      = false,
     sellEvery     = 120,
     antiAfk       = true,
@@ -369,29 +368,15 @@ end
 local ctrl = Controller.new()
 
 ----------------------------------------------------------------- cast (input-based: charge, let go at >=95)
-local castStartAt, _lastPower, _plateauAt = 0, -1, 0
-local function stepCharge(rod, vals)
+-- time-based charge: hold for CFG.chargeTime, then let go. The bar fills to max in a
+-- fixed time, so a tuned hold gives an identical (perfect) cast every time.
+local castStartAt = 0
+local function stepCharge()
     holdMouse()
-    if castStartAt == 0 then castStartAt = tick(); _lastPower = -1; _plateauAt = 0 end
-    local powerVal = vals and vals:FindFirstChild("power")
-    local p = powerVal and powerVal.Value or nil
-    if p and p <= 1.5 then p = p * 100 end                    -- normalise 0..1 -> 0..100
-    local heldFor = tick() - castStartAt
-    if p then
-        -- perfect cast = let go at the TOP. Release at the threshold OR the instant
-        -- power stops climbing near the top (it's maxed = as-perfect-as-it-gets).
-        if _lastPower >= 0 and math.abs(p - _lastPower) < 0.4 then
-            if _plateauAt == 0 then _plateauAt = tick() end
-        else
-            _plateauAt = 0
-        end
-        _lastPower = p
-        local maxed = _plateauAt > 0 and (tick() - _plateauAt) >= 0.05 and p >= 85
-        if p >= CFG.castThreshold or maxed then
-            releaseMouse(); castStartAt = 0; return           -- let go -> cast fires
-        end
+    if castStartAt == 0 then castStartAt = tick() end
+    if tick() - castStartAt >= CFG.chargeTime then
+        releaseMouse(); castStartAt = 0                        -- let go -> cast fires
     end
-    if heldFor >= CFG.castMaxHold then releaseMouse(); castStartAt = 0 end
 end
 
 ----------------------------------------------------------------- shake (click the button, no resize)
@@ -432,7 +417,7 @@ _G.__FischConn = RunService.Heartbeat:Connect(function()
                 if casted and casted.Value == true then
                     releaseMouse(); castStartAt = 0        -- bobber out, waiting for a bite
                 elseif rod then
-                    stepCharge(rod, vals)                  -- charge + let go at >=95
+                    stepCharge()                           -- charge for CFG.chargeTime, then let go
                 else
                     releaseMouse()
                 end
@@ -514,7 +499,7 @@ if okUI and Rayfield then
     Fishing:CreateToggle({ Name = "Auto-equip rod", CurrentValue = true, Callback = function(v) CFG.autoEquip = v end })
     Fishing:CreateDropdown({ Name = "Reel mode", Options = { "hybrid","predict","spam" }, CurrentOption = { "hybrid" }, MultipleOptions = false,
         Callback = function(o) CFG.reelMode = (type(o)=="table" and o[1]) or o end })
-    Fishing:CreateSlider({ Name = "Cast: let go at power (99 = perfect)", Range = { 80, 100 }, Increment = 1, CurrentValue = 99, Callback = function(v) CFG.castThreshold = v end })
+    Fishing:CreateSlider({ Name = "Charge time (s) - tune for Perfect Cast", Range = { 0.3, 3 }, Increment = 0.05, CurrentValue = 1, Callback = function(v) CFG.chargeTime = v end })
     local statusLbl = Fishing:CreateLabel("status: idle")
     task.spawn(function() while true do task.wait(0.4)
         pcall(function() statusLbl:Set(("rod: %s | mode: %s | auto: %s"):format(_G.Fisch.rod(), CFG.reelMode, tostring(CFG.autoFish))) end)
