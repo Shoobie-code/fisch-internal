@@ -29,6 +29,7 @@ local CFG = {
     autoFish      = false,
     autoEquip     = true,
     reelMode      = "hybrid",   -- "spam" | "predict" | "hybrid"
+    castHold      = 0.2,        -- hold the button this long, then let go -> cast
     autoSell      = false,
     sellEvery     = 120,
     antiAfk       = true,
@@ -367,27 +368,12 @@ end
 local ctrl = Controller.new()
 
 ----------------------------------------------------------------- cast (input-based: charge, let go at >=95)
--- release as soon as the cast/power UI shows up (quick minimal cast), short fallback.
-local function castUiUp()
-    local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-    local power = hrp and hrp:FindFirstChild("power")
-    if power then
-        for _, d in ipairs(power:GetDescendants()) do
-            if d:IsA("GuiObject") and d.Visible then return true end
-        end
-    end
-    local rod = getRod()
-    local rc  = rod and rod:FindFirstChild("rod/client")
-    local pb  = rc and rc:FindFirstChild("powerbar")
-    if pb and pb.Visible then return true end
-    return false
-end
+-- hold the button briefly (CFG.castHold), then let go -> cast.
 local castStartAt = 0
 local function stepCharge()
     holdMouse()
     if castStartAt == 0 then castStartAt = tick() end
-    local held = tick() - castStartAt
-    if (held >= 0.06 and castUiUp()) or held >= 0.35 then     -- let go the moment the UI is up
+    if tick() - castStartAt >= CFG.castHold then
         releaseMouse(); castStartAt = 0
     end
 end
@@ -512,6 +498,7 @@ if okUI and Rayfield then
     Fishing:CreateToggle({ Name = "Auto-equip rod", CurrentValue = true, Callback = function(v) CFG.autoEquip = v end })
     Fishing:CreateDropdown({ Name = "Reel mode", Options = { "hybrid","predict","spam" }, CurrentOption = { "hybrid" }, MultipleOptions = false,
         Callback = function(o) CFG.reelMode = (type(o)=="table" and o[1]) or o end })
+    Fishing:CreateSlider({ Name = "Cast hold (s)", Range = { 0.05, 1 }, Increment = 0.05, CurrentValue = 0.2, Callback = function(v) CFG.castHold = v end })
     local statusLbl = Fishing:CreateLabel("status: idle")
     task.spawn(function() while true do task.wait(0.4)
         pcall(function() statusLbl:Set(("rod: %s | mode: %s | auto: %s"):format(_G.Fisch.rod(), CFG.reelMode, tostring(CFG.autoFish))) end)
