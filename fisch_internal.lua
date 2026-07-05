@@ -49,6 +49,8 @@ end
 local function getRod()
     local char = plr.Character
     if not char then return nil end
+    local rodName = plr:GetAttribute("CurrentRod")           -- game tracks the equipped rod's name
+    if rodName then local t = char:FindFirstChild(rodName); if t and t:IsA("Tool") then return t end end
     for _, t in ipairs(char:GetChildren()) do if isRodTool(t) then return t end end
     return nil
 end
@@ -263,57 +265,56 @@ _G.Fisch = {
     rod = function() local r = getRod() return r and r.Name or "none" end,
 }
 
------------------------------------------------------------------ UI (Fluent — PC + mobile)
-local okUI, Fluent = pcall(function()
-    return loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-end)
-if okUI and Fluent then
-    local Window = Fluent:CreateWindow({
-        Title = "Fisch", SubTitle = "Auto-Fisher", TabWidth = 150,
-        Size = UDim2.fromOffset(500, 380), Acrylic = false, Theme = "Dark",
-        MinimizeKey = Enum.KeyCode.RightControl,
+----------------------------------------------------------------- UI (Rayfield — has a built-in on-screen toggle button, works on mobile)
+local okUI, Rayfield = pcall(function() return loadstring(game:HttpGet("https://sirius.menu/rayfield"))() end)
+if okUI and Rayfield then
+    local Window = Rayfield:CreateWindow({
+        Name = "Fisch Auto-Fisher",
+        LoadingTitle = "Fisch",
+        LoadingSubtitle = "auto-fisher",
+        ConfigurationSaving = { Enabled = false },
+        KeySystem = false,
     })
-    local Fishing = Window:AddTab({ Title = "Fishing", Icon = "fish" })
-    local Travel  = Window:AddTab({ Title = "Travel", Icon = "map" })
-    local Quests  = Window:AddTab({ Title = "Quests", Icon = "scroll" })
-    local Misc    = Window:AddTab({ Title = "Misc", Icon = "settings" })
 
-    Fishing:AddToggle("AutoFish", { Title = "Auto Fish", Default = false, Callback = function(v) CFG.autoFish = v end })
-    Fishing:AddToggle("AutoEquip", { Title = "Auto-equip rod", Default = true, Callback = function(v) CFG.autoEquip = v end })
-    Fishing:AddSlider("CastType", { Title = "Cast type (try 1 or 2)", Default = 1, Min = 1, Max = 2, Rounding = 0,
-        Callback = function(v) CFG.castType = v end })
-    local st = Fishing:AddParagraph({ Title = "Status", Content = "idle" })
+    local Fishing = Window:CreateTab("Fishing")
+    Fishing:CreateToggle({ Name = "Auto Fish", CurrentValue = false, Flag = "AutoFish", Callback = function(v) CFG.autoFish = v end })
+    Fishing:CreateToggle({ Name = "Auto-equip rod", CurrentValue = true, Callback = function(v) CFG.autoEquip = v end })
+    Fishing:CreateSlider({ Name = "Cast type (try 1 or 2)", Range = { 1, 2 }, Increment = 1, CurrentValue = 1, Callback = function(v) CFG.castType = v end })
+    Fishing:CreateButton({ Name = "Cast now (test)", Callback = function() doCast() end })
+    local statusLbl = Fishing:CreateLabel("status: idle")
     task.spawn(function()
         while true do task.wait(0.5)
             pcall(function()
-                st:SetDesc(("Auto: %s | rod: %s | reel remote: %s | sell: %s")
-                    :format(tostring(CFG.autoFish), _G.Fisch.rod(),
-                        ReelFinished and "ok" or "none", SellAll and "ok" or "none"))
+                statusLbl:Set(("rod: %s | auto: %s | reel: %s | sell: %s"):format(
+                    _G.Fisch.rod(), tostring(CFG.autoFish),
+                    ReelFinished and "ok" or "none", SellAll and "ok" or "none"))
             end)
         end
     end)
 
+    local Travel = Window:CreateTab("Travel")
     local names = locNames()
     local chosen = names[1]
-    Travel:AddDropdown("Loc", { Title = "Location", Values = names, Multi = false, Default = 1,
-        Callback = function(v) chosen = v end })
-    Travel:AddButton({ Title = "Teleport", Callback = function() if chosen then teleport(chosen) end end })
-    Travel:AddButton({ Title = "Go to Roslit Bay (Orc/Magma quest)", Callback = function() teleport("Roslit Bay") end })
+    Travel:CreateDropdown({ Name = "Location", Options = names, CurrentOption = { names[1] }, MultipleOptions = false,
+        Callback = function(o) chosen = (type(o) == "table" and o[1]) or o end })
+    Travel:CreateButton({ Name = "Teleport", Callback = function() if chosen then teleport(chosen) end end })
+    Travel:CreateButton({ Name = "Go to Roslit Bay (Orc/Magma quest)", Callback = function() teleport("Roslit Bay") end })
 
+    local QuestsTab = Window:CreateTab("Quests")
     local qnames = {} for n in pairs(QUESTS) do qnames[#qnames + 1] = n end table.sort(qnames)
     local qchosen = qnames[1]
-    Quests:AddDropdown("Quest", { Title = "Quest", Values = qnames, Multi = false, Default = 1, Callback = function(v) qchosen = v end })
-    Quests:AddButton({ Title = "Start (teleport + auto-catch target)", Callback = function() if qchosen then startQuest(qchosen) end end })
-    Quests:AddToggle("QuestAssist", { Title = "Auto-talk to NPC (best-effort)", Default = false, Callback = function(v) questAssist = v end })
-    Quests:AddParagraph({ Title = "How it works", Content = "Teleport + auto-catch are reliable. NPC dialog auto-click is a best-effort guess (no game recon) - if it doesn't turn the quest in, talk to the NPC yourself." })
+    QuestsTab:CreateDropdown({ Name = "Quest", Options = qnames, CurrentOption = { qnames[1] }, MultipleOptions = false,
+        Callback = function(o) qchosen = (type(o) == "table" and o[1]) or o end })
+    QuestsTab:CreateButton({ Name = "Start (teleport + auto-catch target)", Callback = function() if qchosen then startQuest(qchosen) end end })
+    QuestsTab:CreateToggle({ Name = "Auto-talk to NPC (best-effort)", CurrentValue = false, Callback = function(v) questAssist = v end })
+    QuestsTab:CreateParagraph({ Title = "How it works", Content = "Teleport + auto-catch are reliable. NPC dialog auto-click is a best-effort guess - if it doesn't turn the quest in, talk to the NPC yourself." })
 
-    Misc:AddToggle("AutoSell", { Title = "Auto-sell", Default = false, Callback = function(v) CFG.autoSell = v end })
-    Misc:AddButton({ Title = "Sell now", Callback = function() sellAll() end })
-    Misc:AddToggle("AntiAfk", { Title = "Anti-AFK", Default = true, Callback = function(v) CFG.antiAfk = v end })
-
-    Fluent:Notify({ Title = "Fisch", Content = "Loaded. Toggle Auto Fish.", Duration = 4 })
+    local MiscTab = Window:CreateTab("Misc")
+    MiscTab:CreateToggle({ Name = "Auto-sell", CurrentValue = false, Callback = function(v) CFG.autoSell = v end })
+    MiscTab:CreateButton({ Name = "Sell now", Callback = function() sellAll() end })
+    MiscTab:CreateToggle({ Name = "Anti-AFK", CurrentValue = true, Callback = function(v) CFG.antiAfk = v end })
 else
-    warn("[Fisch] Fluent failed — use _G.Fisch.on()/off()/tp(name)/sell().")
+    warn("[Fisch] Rayfield failed — use _G.Fisch.on()/off()/tp(name)/sell().")
 end
 
 print("[Fisch] loaded. rod=" .. tostring(_G.Fisch.rod()) .. " reelRemote=" .. tostring(ReelFinished and ReelFinished.Name) .. " sell=" .. tostring(SellAll and SellAll.Name))
