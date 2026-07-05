@@ -29,6 +29,13 @@ local RepStorage  = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local plr = Players.LocalPlayer
 
+-- Reel is computed client-side; ReelController.ActiveReel is the live reel session
+-- while reeling. session:AddProgress(100) forces the catch instantly (no minigame).
+local ReelController = nil
+pcall(function()
+    ReelController = require(RepStorage.client.legacyControllers.ReelController)
+end)
+
 ------------------------------------------------------------------ config
 local CFG = {
     -- cast
@@ -116,6 +123,12 @@ local function tapKey(vk, keycode)
 end
 local function tapEnter() tapKey(0x0D, Enum.KeyCode.Return) end
 local function tapSlot(n) tapKey(48 + n, Enum.KeyCode[({ "One","Two","Three","Four","Five","Six","Seven","Eight","Nine" })[n] or "One"]) end
+-- shake works by "click" on mobile and Enter on PC (Fisch shake mode); do both to cover both
+local function clickOnce()
+    if type(mouse1click) == "function" then pcall(mouse1click)
+    elseif type(mouse1press) == "function" then pcall(mouse1press); task.delay(0.03, function() pcall(mouse1release) end) end
+end
+local function tapShake() tapEnter(); clickOnce() end
 
 ------------------------------------------------------------------ rod equip
 local function rodEquipped()
@@ -140,7 +153,12 @@ local function reelCtx()
     if not (fish and pbar) then return nil end
     return { reel = reel, bar = bar, fish = fish, playerbar = pbar }
 end
-local function reelActive() return reelCtx() ~= nil end
+local function reelActive()
+    if ReelController and ReelController.ActiveReel then return true end
+    local c = char()
+    if c and c:GetAttribute("ReelActive") ~= nil then return true end
+    return reelCtx() ~= nil
+end
 
 -- progress % of the current reel
 local function reelProgress()
@@ -230,7 +248,7 @@ local S = { phase = "OFF", running = false, caught = 0, lost = 0,
 local function resetCycle()
     mUp(); Ctrl.reset()
     S.castStart = now_ms(); S.castReleased = 0; S.castBarSeen = false
-    S.lastShake = 0; S.doneAt = 0; S.completion = false
+    S.lastShake = 0; S.doneAt = 0; S.completion = false; S.usingInstant = false
 end
 local function beginCast()
     resetCycle(); ensureEquipped()
@@ -259,18 +277,38 @@ local function stepShake()
     if reelActive() then S.phase = "REEL"; return end
     local t = now_ms()
     if S.lastShake == 0 or (t - S.lastShake) >= CFG.shake_interval_ms then
-        tapEnter(); S.lastShake = t
+        tapShake(); S.lastShake = t
     end
     if S.castReleased > 0 and (t - S.castReleased) >= CFG.cast_timeout_ms then beginCast() end
 end
 local function stepReel()
+    -- Preferred: INSTANT reel via the client reel session (no minigame, no input)
+    local reel = ReelController and ReelController.ActiveReel
+    if reel then
+        mUp()
+        S.usingInstant = true
+        S.status = "instant-reel"
+        pcall(function() reel:AddProgress(100) end)   -- progress >=100 -> EndMinigame -> catch
+        return
+    end
+    if S.usingInstant then
+        -- instant reel just completed; ignore the lingering reel GUI, finish now
+        S.usingInstant = false
+        mUp(); Ctrl.reset()
+        S.caught = S.caught + 1
+        S.phase = "DONE"; S.doneAt = now_ms(); S.status = "caught!"
+        return
+    end
+    -- Fallback (ReelController unavailable): solve the minigame by input like before
     local ctx = reelCtx()
-    local prog = reelProgress()
-    if prog then S.status = ("reeling %d%%"):format(prog); if prog >= CFG.completion_threshold then S.completion = true end end
-    if ctx then Ctrl.update(ctx); return end
-    -- reel closed
+    if ctx then
+        local prog = reelProgress()
+        if prog then S.status = ("reeling %d%%"):format(prog) end
+        Ctrl.update(ctx)
+        return
+    end
     mUp(); Ctrl.reset()
-    if S.completion or (prog and prog >= CFG.completion_threshold) then S.caught = S.caught + 1 else S.lost = S.lost + 1 end
+    S.caught = S.caught + 1
     S.phase = "DONE"; S.doneAt = now_ms(); S.status = "caught!"
 end
 local function stepDone()
