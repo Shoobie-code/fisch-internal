@@ -130,6 +130,45 @@ local function clickOnce()
 end
 local function tapShake() tapEnter(); clickOnce() end
 
+-- find the first descendant of a class (for the shake button)
+local function firstDescOfClass(root, class)
+    if not root then return nil end
+    local stack, i = { root }, 1
+    while i <= #stack do
+        local node = stack[i]; i = i + 1
+        for _, ch in ipairs(node:GetChildren()) do
+            if ch:IsA(class) then return ch end
+            stack[#stack + 1] = ch
+        end
+        if i > 4000 then break end
+    end
+    return nil
+end
+
+-- INPUT-FREE shake: fire the shake button's click event directly (no tap/keypress).
+-- Layers: firesignal (no input at all) -> VirtualInputManager virtual click -> tap fallback.
+local function fireShake()
+    local pg = plr:FindFirstChildOfClass("PlayerGui")
+    local sui = pg and pg:FindFirstChild("shakeui")
+    local btn = sui and (firstDescOfClass(sui, "ImageButton") or firstDescOfClass(sui, "TextButton"))
+    if btn then
+        if type(firesignal) == "function" then
+            pcall(firesignal, btn.MouseButton1Click)
+            pcall(firesignal, btn.Activated, nil, 1)
+            return true
+        end
+        local okv = pcall(function()
+            local VIM = game:GetService("VirtualInputManager")
+            local c = btn.AbsolutePosition + btn.AbsoluteSize / 2
+            VIM:SendMouseButtonEvent(c.X, c.Y, 0, true, game, 1)
+            VIM:SendMouseButtonEvent(c.X, c.Y, 0, false, game, 1)
+        end)
+        if okv then return true end
+    end
+    tapShake()   -- last resort: virtual click + Enter
+    return false
+end
+
 ------------------------------------------------------------------ rod equip
 local function rodEquipped()
     local c = char(); if not c then return false end
@@ -277,7 +316,7 @@ local function stepShake()
     if reelActive() then S.phase = "REEL"; return end
     local t = now_ms()
     if S.lastShake == 0 or (t - S.lastShake) >= CFG.shake_interval_ms then
-        tapShake(); S.lastShake = t
+        fireShake(); S.lastShake = t
     end
     if S.castReleased > 0 and (t - S.castReleased) >= CFG.cast_timeout_ms then beginCast() end
 end
