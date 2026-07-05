@@ -29,6 +29,7 @@ local SellAll      = ev("SellAll") or ev("selleverything")
 ----------------------------------------------------------------- config
 local CFG = {
     autoFish    = false,
+    autoEquip   = true,   -- auto-equip your rod if it isn't in hand
     castPower   = 100,
     castType    = 1,      -- 1 or 2 (open scripts use both); tweak if casts fail
     autoSell    = false,
@@ -36,20 +37,40 @@ local CFG = {
     antiAfk     = true,
 }
 
------------------------------------------------------------------ rod detection (structure-based, name-agnostic)
--- the equipped rod is a Tool in the character whose `events` folder holds cast/castAsync.
+----------------------------------------------------------------- rod detection + auto-equip
+-- a rod = a Tool with a `rod/client` script, or an `events` folder holding cast/castAsync.
+local function isRodTool(t)
+    if not (t and t:IsA("Tool")) then return false end
+    if t:FindFirstChild("rod/client") then return true end
+    local e = t:FindFirstChild("events")
+    return e ~= nil and (e:FindFirstChild("castAsync") ~= nil or e:FindFirstChild("cast") ~= nil)
+end
+-- the equipped rod (a rod Tool inside the character) — casting needs it equipped
 local function getRod()
     local char = plr.Character
     if not char then return nil end
-    for _, t in ipairs(char:GetChildren()) do
-        if t:IsA("Tool") then
-            local e = t:FindFirstChild("events")
-            if e and (e:FindFirstChild("castAsync") or e:FindFirstChild("cast")) then
-                return t
-            end
-        end
-    end
+    for _, t in ipairs(char:GetChildren()) do if isRodTool(t) then return t end end
     return nil
+end
+-- the rod Tool anywhere (character or backpack), preferring the game's CurrentRod attribute
+local function findRodTool()
+    local char = plr.Character
+    local bp = plr:FindFirstChildOfClass("Backpack")
+    local rodName = plr:GetAttribute("CurrentRod")
+    if rodName then
+        local t = (char and char:FindFirstChild(rodName)) or (bp and bp:FindFirstChild(rodName))
+        if isRodTool(t) then return t end
+    end
+    local function scan(c) if c then for _, t in ipairs(c:GetChildren()) do if isRodTool(t) then return t end end end end
+    return (char and scan(char)) or (bp and scan(bp))
+end
+-- equip the rod if it isn't already in the character (no input — uses EquipTool)
+local function ensureEquipped()
+    if getRod() then return end
+    local char = plr.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local rod = findRodTool()
+    if hum and rod and rod.Parent ~= char then pcall(function() hum:EquipTool(rod) end) end
 end
 
 ----------------------------------------------------------------- mechanics
@@ -69,15 +90,18 @@ local function doCast()
     end
 end
 
-local _reelFiredFor = false
+-- LEGIT reel: play the minigame by keeping the player bar on the fish, and let the
+-- game complete it naturally. NO forged completion remote — firing catchfinish/
+-- reelfinished to auto-win is the BLATANT path that got the account banned.
 local function doReel(reelUI)
-    if _reelFiredFor then return end                          -- once per reel
-    _reelFiredFor = true
-    local rod = getRod()
-    local e = rod and rod:FindFirstChild("events")
-    local cf = e and e:FindFirstChild("catchfinish")
-    if cf then pcall(function() cf:FireServer(100, true) end) end
-    if ReelFinished then pcall(function() ReelFinished:FireServer(100, true) end) end
+    local bar  = reelUI:FindFirstChild("bar")
+    local pbar = bar and bar:FindFirstChild("playerbar")
+    local fish = bar and bar:FindFirstChild("fish")
+    if not (pbar and fish) then return end
+    pcall(function()
+        local target = pbar.Position:Lerp(fish.Position, 0.75)
+        pbar.Position = UDim2.fromScale(math.clamp(target.X.Scale, 0.05, 0.95), pbar.Position.Y.Scale)
+    end)
 end
 
 local function doShake(sui)
@@ -98,28 +122,27 @@ local function doShake(sui)
 end
 
 ----------------------------------------------------------------- main loop
-task.spawn(function()
-    while true do
-        task.wait(0.1)
-        if CFG.autoFish then
-            pcall(function()
-                local pg = plr:FindFirstChildOfClass("PlayerGui")
-                if not pg then return end
-                local sui = pg:FindFirstChild("shakeui")
-                local reelUI = pg:FindFirstChild("reel")
-                if sui then
-                    doShake(sui)
-                elseif reelUI then
-                    doReel(reelUI)
-                else
-                    _reelFiredFor = false                     -- reel closed; re-arm
-                    doCast()
-                end
-            end)
+-- Heartbeat = smooth per-frame reel tracking; cast/shake are throttled.
+local _lastCast, _lastShake = 0, 0
+RunService.Heartbeat:Connect(function()
+    if not CFG.autoFish then return end
+    pcall(function()
+        local pg = plr:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local sui = pg:FindFirstChild("shakeui")
+        local reelUI = pg:FindFirstChild("reel")
+        if sui then
+            if tick() - _lastShake >= 0.08 then doShake(sui); _lastShake = tick() end
+        elseif reelUI then
+            doReel(reelUI)                                    -- per-frame fish tracking
         else
-            _reelFiredFor = false
+            if tick() - _lastCast >= 0.5 then
+                if CFG.autoEquip then ensureEquipped() end
+                doCast()
+                _lastCast = tick()
+            end
         end
-    end
+    end)
 end)
 
 ----------------------------------------------------------------- sell
@@ -168,6 +191,65 @@ local function teleport(name)
     if pos and hrp then pcall(function() hrp.CFrame = CFrame.new(pos + Vector3.new(0, 5, 0)) end) end
 end
 
+----------------------------------------------------------------- quests (best-effort; no game recon available)
+-- RELIABLE = teleport + auto-catch the target fish. BEST-EFFORT = NPC dialog (a guess).
+local QUESTS = {
+    ["Magma Rod - Orc @ Roslit (Pufferfish)"]      = { loc = "Roslit Bay",     fish = "Pufferfish" },
+    ["Fungal Rod - Agaric @ Mushgrove (Alligator)"] = { loc = "Mushgrove Swamp", fish = "Alligator" },
+}
+local questAssist = false   -- fire nearby NPC prompts + advance dialog
+
+local function firePromptsNear(range)
+    local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or type(fireproximityprompt) ~= "function" then return end
+    local world = workspace:FindFirstChild("world")
+    local npcs = world and world:FindFirstChild("npcs")
+    if not npcs then return end
+    for _, d in ipairs(npcs:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then
+            local p = d.Parent
+            if p and p:IsA("BasePart") and (p.Position - hrp.Position).Magnitude <= (range or 30) then
+                pcall(fireproximityprompt, d)
+            end
+        end
+    end
+end
+
+local DIALOG_WORDS = { "accept", "continue", "give", "turn in", "complete", "claim", "yes", "okay", "next" }
+local function advanceDialog()
+    local pg = plr:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    for _, g in ipairs(pg:GetDescendants()) do
+        if (g:IsA("TextButton") or g:IsA("ImageButton")) and g.Visible then
+            local txt = (g:IsA("TextButton") and type(g.Text) == "string") and g.Text:lower() or ""
+            local hit = false
+            for _, w in ipairs(DIALOG_WORDS) do if txt:find(w, 1, true) then hit = true break end end
+            if not hit then
+                local a = g
+                for _ = 1, 6 do a = a and a.Parent; if a and type(a.Name) == "string" and a.Name:lower():find("dialog") then hit = true break end end
+            end
+            if hit then
+                if type(replicatesignal) == "function" then pcall(replicatesignal, g.MouseButton1Click)
+                elseif type(firesignal) == "function" then pcall(firesignal, g.MouseButton1Click) end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1.5)
+        if questAssist then pcall(function() firePromptsNear(30); advanceDialog() end) end
+    end
+end)
+
+local function startQuest(name)
+    local q = QUESTS[name]; if not q then return end
+    teleport(q.loc)
+    CFG.autoFish = true
+    questAssist = true
+end
+
 ----------------------------------------------------------------- anti-afk
 plr.Idled:Connect(function()
     if CFG.antiAfk then pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end) end
@@ -193,9 +275,11 @@ if okUI and Fluent then
     })
     local Fishing = Window:AddTab({ Title = "Fishing", Icon = "fish" })
     local Travel  = Window:AddTab({ Title = "Travel", Icon = "map" })
+    local Quests  = Window:AddTab({ Title = "Quests", Icon = "scroll" })
     local Misc    = Window:AddTab({ Title = "Misc", Icon = "settings" })
 
     Fishing:AddToggle("AutoFish", { Title = "Auto Fish", Default = false, Callback = function(v) CFG.autoFish = v end })
+    Fishing:AddToggle("AutoEquip", { Title = "Auto-equip rod", Default = true, Callback = function(v) CFG.autoEquip = v end })
     Fishing:AddSlider("CastType", { Title = "Cast type (try 1 or 2)", Default = 1, Min = 1, Max = 2, Rounding = 0,
         Callback = function(v) CFG.castType = v end })
     local st = Fishing:AddParagraph({ Title = "Status", Content = "idle" })
@@ -215,6 +299,13 @@ if okUI and Fluent then
         Callback = function(v) chosen = v end })
     Travel:AddButton({ Title = "Teleport", Callback = function() if chosen then teleport(chosen) end end })
     Travel:AddButton({ Title = "Go to Roslit Bay (Orc/Magma quest)", Callback = function() teleport("Roslit Bay") end })
+
+    local qnames = {} for n in pairs(QUESTS) do qnames[#qnames + 1] = n end table.sort(qnames)
+    local qchosen = qnames[1]
+    Quests:AddDropdown("Quest", { Title = "Quest", Values = qnames, Multi = false, Default = 1, Callback = function(v) qchosen = v end })
+    Quests:AddButton({ Title = "Start (teleport + auto-catch target)", Callback = function() if qchosen then startQuest(qchosen) end end })
+    Quests:AddToggle("QuestAssist", { Title = "Auto-talk to NPC (best-effort)", Default = false, Callback = function(v) questAssist = v end })
+    Quests:AddParagraph({ Title = "How it works", Content = "Teleport + auto-catch are reliable. NPC dialog auto-click is a best-effort guess (no game recon) - if it doesn't turn the quest in, talk to the NPC yourself." })
 
     Misc:AddToggle("AutoSell", { Title = "Auto-sell", Default = false, Callback = function(v) CFG.autoSell = v end })
     Misc:AddButton({ Title = "Sell now", Callback = function() sellAll() end })
