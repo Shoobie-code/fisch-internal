@@ -29,7 +29,6 @@ local CFG = {
     autoFish      = false,
     autoEquip     = true,
     reelMode      = "hybrid",   -- "spam" | "predict" | "hybrid"
-    chargeTime    = 1.0,        -- hold this long to charge, then let go. tune until it's a Perfect Cast.
     autoSell      = false,
     sellEvery     = 120,
     antiAfk       = true,
@@ -368,14 +367,28 @@ end
 local ctrl = Controller.new()
 
 ----------------------------------------------------------------- cast (input-based: charge, let go at >=95)
--- time-based charge: hold for CFG.chargeTime, then let go. The bar fills to max in a
--- fixed time, so a tuned hold gives an identical (perfect) cast every time.
+-- release as soon as the cast/power UI shows up (quick minimal cast), short fallback.
+local function castUiUp()
+    local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+    local power = hrp and hrp:FindFirstChild("power")
+    if power then
+        for _, d in ipairs(power:GetDescendants()) do
+            if d:IsA("GuiObject") and d.Visible then return true end
+        end
+    end
+    local rod = getRod()
+    local rc  = rod and rod:FindFirstChild("rod/client")
+    local pb  = rc and rc:FindFirstChild("powerbar")
+    if pb and pb.Visible then return true end
+    return false
+end
 local castStartAt = 0
 local function stepCharge()
     holdMouse()
     if castStartAt == 0 then castStartAt = tick() end
-    if tick() - castStartAt >= CFG.chargeTime then
-        releaseMouse(); castStartAt = 0                        -- let go -> cast fires
+    local held = tick() - castStartAt
+    if (held >= 0.06 and castUiUp()) or held >= 0.35 then     -- let go the moment the UI is up
+        releaseMouse(); castStartAt = 0
     end
 end
 
@@ -499,7 +512,6 @@ if okUI and Rayfield then
     Fishing:CreateToggle({ Name = "Auto-equip rod", CurrentValue = true, Callback = function(v) CFG.autoEquip = v end })
     Fishing:CreateDropdown({ Name = "Reel mode", Options = { "hybrid","predict","spam" }, CurrentOption = { "hybrid" }, MultipleOptions = false,
         Callback = function(o) CFG.reelMode = (type(o)=="table" and o[1]) or o end })
-    Fishing:CreateSlider({ Name = "Charge time (s) - tune for Perfect Cast", Range = { 0.3, 3 }, Increment = 0.05, CurrentValue = 1, Callback = function(v) CFG.chargeTime = v end })
     local statusLbl = Fishing:CreateLabel("status: idle")
     task.spawn(function() while true do task.wait(0.4)
         pcall(function() statusLbl:Set(("rod: %s | mode: %s | auto: %s"):format(_G.Fisch.rod(), CFG.reelMode, tostring(CFG.autoFish))) end)
