@@ -45,12 +45,11 @@ local function isRodTool(t)
     local e = t:FindFirstChild("events")
     return e ~= nil and (e:FindFirstChild("castAsync") ~= nil or e:FindFirstChild("cast") ~= nil)
 end
--- the equipped rod (a rod Tool inside the character) — casting needs it equipped
+-- the equipped rod (a rod Tool inside the character) — casting needs it equipped.
+-- pure structure scan (this is the version that cast reliably; do not "improve" it).
 local function getRod()
     local char = plr.Character
     if not char then return nil end
-    local rodName = plr:GetAttribute("CurrentRod")           -- game tracks the equipped rod's name
-    if rodName then local t = char:FindFirstChild(rodName); if t and t:IsA("Tool") then return t end end
     for _, t in ipairs(char:GetChildren()) do if isRodTool(t) then return t end end
     return nil
 end
