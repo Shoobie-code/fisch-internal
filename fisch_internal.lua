@@ -1,226 +1,190 @@
 --[[
-    Fisch — Internal Auto-Fisher (remote-based, zero simulated input)
-    =================================================================
+    Fisch — Internal Auto-Fisher (remote-based)
+    ===========================================
     For an injecting executor (Wave/Solara/Script-Ware/AWP/...). NOT Matcha.
 
-    Rewritten around the CORRECT game mechanics (thanks to a known-good reference):
-      - Cast   : CurrentTool.events.cast:FireServer(100, 1)        (remote, no mouse)
-      - Reel   : events["reelfinished "]:FireServer(100, perfect)  (instant, no minigame)
-      - Shake  : replicatesignal(shakeButton.MouseButton1Click)    (server-side, no input)
-      - Sell   : events.SellAll:InvokeServer()
-    Rod is tracked via Character.ChildAdded/ChildRemoved. No mouse movement anywhere.
-    UI = Fluent (touch-friendly, works on PC + mobile), with a _G.Fisch console fallback.
+    Mechanics = LIVE-RECON of the current game (remote NAMES) + open-source scripts
+    (arg patterns, shake technique, teleport coords):
+      - Rod        : the equipped Tool whose `events` folder has cast/castAsync (found by structure, name-agnostic)
+      - Cast       : rod.events.castAsync:InvokeServer(100, castType)   [RemoteFunction]  (fallback: events.cast:FireServer)
+      - Reel/catch : rod.events.catchfinish:FireServer(100, true) AND events.reelfinished:FireServer(100, true)
+      - Shake      : enlarge PlayerGui.shakeui.safezone.button + replicatesignal(button.MouseButton1Click)
+      - Sell       : events.SellAll:InvokeServer()
+      - Teleport   : HumanoidRootPart.CFrame = hardcoded zone coords
+    No mouse movement, no keypresses. UI = Fluent (PC + mobile). Console: _G.Fisch.
 ]]
 
 local Players     = game:GetService("Players")
 local RunService  = game:GetService("RunService")
 local RepStorage  = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
-local GuiService  = game:GetService("GuiService")
 local plr = Players.LocalPlayer
 
------------------------------------------------------------------ remotes (defensive names)
-local events = RepStorage:WaitForChild("events")
-local function findEvent(...)
-    for _, n in ipairs({ ... }) do
-        local e = events:FindFirstChild(n)
-        if e then return e end
-    end
-    return nil
-end
-local ReelFinished = findEvent("reelfinished ", "reelfinished")  -- game dev typo has a trailing space
-local SellAll      = findEvent("SellAll", "selleverything", "sellall")
+----------------------------------------------------------------- remotes
+local eventsFolder = RepStorage:WaitForChild("events")
+local function ev(name) return eventsFolder:FindFirstChild(name) end
+local ReelFinished = ev("reelfinished ") or ev("reelfinished")
+local SellAll      = ev("SellAll") or ev("selleverything")
 
 ----------------------------------------------------------------- config
 local CFG = {
-    autoFish     = false,
-    perfectReel  = true,
-    autoEquip    = true,
-    autoSell     = false,
-    sellInterval = 120,
-    antiAfk      = true,
+    autoFish    = false,
+    castPower   = 100,
+    castType    = 1,      -- 1 or 2 (open scripts use both); tweak if casts fail
+    autoSell    = false,
+    sellEvery   = 120,
+    antiAfk     = true,
 }
 
------------------------------------------------------------------ rod / tool tracking
-local CurrentTool = nil
-
-local function isRod(t)
-    if not (t and t:IsA("Tool")) then return false end
-    local v = t:FindFirstChild("values")
-    local e = t:FindFirstChild("events")
-    return (v and v:FindFirstChild("casted") ~= nil) or (e and e:FindFirstChild("cast") ~= nil)
-end
-
-local function onChildAdded(c)   if c:IsA("Tool") then CurrentTool = c end end
-local function onChildRemoved(c) if c:IsA("Tool") and c == CurrentTool then CurrentTool = nil end end
-local function hookCharacter(char)
-    CurrentTool = char:FindFirstChildOfClass("Tool")
-    char.ChildAdded:Connect(onChildAdded)
-    char.ChildRemoved:Connect(onChildRemoved)
-end
-plr.CharacterAdded:Connect(hookCharacter)
-if plr.Character then hookCharacter(plr.Character) end
-
--- equip a rod from the backpack if none is held
-local function equipRod()
-    if CurrentTool and isRod(CurrentTool) then return end
+----------------------------------------------------------------- rod detection (structure-based, name-agnostic)
+-- the equipped rod is a Tool in the character whose `events` folder holds cast/castAsync.
+local function getRod()
     local char = plr.Character
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
-    local bp   = plr:FindFirstChildOfClass("Backpack")
-    if not (hum and bp) then return end
-    for _, t in ipairs(bp:GetChildren()) do
-        if isRod(t) then pcall(function() hum:EquipTool(t) end); return end
+    if not char then return nil end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") then
+            local e = t:FindFirstChild("events")
+            if e and (e:FindFirstChild("castAsync") or e:FindFirstChild("cast")) then
+                return t
+            end
+        end
     end
+    return nil
 end
 
------------------------------------------------------------------ mechanics (all remote-based)
+----------------------------------------------------------------- mechanics
 local function doCast()
-    local t = CurrentTool
-    if not (t and isRod(t)) then
-        if CFG.autoEquip then equipRod() end
-        return
-    end
-    local values = t:FindFirstChild("values")
-    local evs    = t:FindFirstChild("events")
-    local casted = values and values:FindFirstChild("casted")
-    if evs and evs:FindFirstChild("cast") and casted and casted.Value == false then
-        pcall(function() evs.cast:FireServer(100, 1) end)     -- full power, forward
-    end
-end
-
-local function doReel()
-    if not ReelFinished then return end
-    local pg = plr:FindFirstChildOfClass("PlayerGui")
-    local reelUI = pg and pg:FindFirstChild("reel")
-    if not reelUI then return end
-    local bar = reelUI:FindFirstChild("bar")
-    local reelScript = bar and bar:FindFirstChild("reel")
-    if reelScript and reelScript.Enabled then
-        pcall(function() ReelFinished:FireServer(100, CFG.perfectReel and true or false) end)
+    local rod = getRod()
+    if not rod then return end
+    local vals = rod:FindFirstChild("values")
+    local casted = vals and vals:FindFirstChild("casted")
+    if casted and casted.Value == true then return end       -- already cast / bobber out
+    local e = rod:FindFirstChild("events")
+    local c = e and (e:FindFirstChild("castAsync") or e:FindFirstChild("cast"))
+    if not c then return end
+    if c:IsA("RemoteFunction") then
+        task.spawn(function() pcall(function() c:InvokeServer(CFG.castPower, CFG.castType) end) end)
+    else
+        pcall(function() c:FireServer(CFG.castPower, CFG.castType) end)
     end
 end
 
--- shake: fire the shake button's click to the server, no input
-local _VIM
-local function vim() _VIM = _VIM or Instance.new("VirtualInputManager"); return _VIM end
-local function clickShakeButton(btn)
-    if type(replicatesignal) == "function" then
-        pcall(replicatesignal, btn.MouseButton1Click)
-        task.delay(0.05, function() pcall(function() btn:Destroy() end) end)
-        return
-    end
-    -- fallback (still no mouse movement): select the button + virtual Enter
+local _reelFiredFor = false
+local function doReel(reelUI)
+    if _reelFiredFor then return end                          -- once per reel
+    _reelFiredFor = true
+    local rod = getRod()
+    local e = rod and rod:FindFirstChild("events")
+    local cf = e and e:FindFirstChild("catchfinish")
+    if cf then pcall(function() cf:FireServer(100, true) end) end
+    if ReelFinished then pcall(function() ReelFinished:FireServer(100, true) end) end
+end
+
+local function doShake(sui)
+    local sz = sui:FindFirstChild("safezone")
+    if not sz then return end
+    local btn = sz:FindFirstChild("button") or sz:FindFirstChildWhichIsA("ImageButton") or sz:FindFirstChildWhichIsA("TextButton")
+    if not btn then return end
     pcall(function()
-        GuiService.SelectedObject = btn
-        vim():SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-        vim():SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        btn.Size = UDim2.new(0, 2000, 0, 2000)               -- huge hitbox (center-shake helper)
+        btn.Position = UDim2.fromScale(0.5, 0.5)
+        btn.AnchorPoint = Vector2.new(0.5, 0.5)
     end)
-end
-
-local function mountShake(shakeui)
-    local safezone = shakeui:WaitForChild("safezone", 5)
-    if not safezone then return end
-    -- process any button already present, then watch for new ones
-    for _, c in ipairs(safezone:GetChildren()) do
-        if c:IsA("ImageButton") and CFG.autoFish then clickShakeButton(c) end
+    if type(replicatesignal) == "function" then
+        pcall(replicatesignal, btn.MouseButton1Click)         -- registers server-side, no input
+    elseif type(firesignal) == "function" then
+        pcall(firesignal, btn.MouseButton1Click)
     end
-    safezone.ChildAdded:Connect(function(c)
-        if CFG.autoFish and c:IsA("ImageButton") then clickShakeButton(c) end
-    end)
 end
 
-local function hookShake()
-    local pg = plr:WaitForChild("PlayerGui")
-    local existing = pg:FindFirstChild("shakeui")
-    if existing then mountShake(existing) end
-    pg.ChildAdded:Connect(function(c)
-        if c.Name == "shakeui" and c:IsA("ScreenGui") then mountShake(c) end
-    end)
-end
-hookShake()
+----------------------------------------------------------------- main loop
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if CFG.autoFish then
+            pcall(function()
+                local pg = plr:FindFirstChildOfClass("PlayerGui")
+                if not pg then return end
+                local sui = pg:FindFirstChild("shakeui")
+                local reelUI = pg:FindFirstChild("reel")
+                if sui then
+                    doShake(sui)
+                elseif reelUI then
+                    doReel(reelUI)
+                else
+                    _reelFiredFor = false                     -- reel closed; re-arm
+                    doCast()
+                end
+            end)
+        else
+            _reelFiredFor = false
+        end
+    end
+end)
 
+----------------------------------------------------------------- sell
 local function sellAll()
     if not SellAll then return false end
     return pcall(function()
         if SellAll:IsA("RemoteFunction") then return SellAll:InvokeServer() else SellAll:FireServer() end
     end)
 end
-
------------------------------------------------------------------ loops
--- cast loop
 task.spawn(function()
     while true do
-        task.wait(0.4)
-        if CFG.autoFish then pcall(doCast) end
-    end
-end)
--- reel loop (fast)
-RunService.Heartbeat:Connect(function()
-    if CFG.autoFish then pcall(doReel) end
-end)
--- sell loop
-task.spawn(function()
-    while true do
-        task.wait(math.max(15, CFG.sellInterval))
+        task.wait(math.max(15, CFG.sellEvery))
         if CFG.autoSell then pcall(sellAll) end
     end
 end)
 
------------------------------------------------------------------ teleport
-local TP = {}   -- name -> Vector3
-local function collectTP()
-    TP = {}
-    local w = workspace:FindFirstChild("world")
-    local spawns = w and w:FindFirstChild("spawns")
-    local spots = spawns and spawns:FindFirstChild("TpSpots")
-    if spots then
-        for _, s in ipairs(spots:GetChildren()) do
-            local ok, pos = pcall(function() return s:IsA("Model") and s:GetPivot().Position or s.Position end)
-            if ok and pos then TP[s.Name] = pos end
-        end
-    end
-    local zones = workspace:FindFirstChild("zones")
-    local fishing = zones and zones:FindFirstChild("fishing")
-    if fishing then
-        for _, z in ipairs(fishing:GetChildren()) do
-            if z:IsA("BasePart") and not TP[z.Name] then TP[z.Name] = z.Position end
-        end
-    end
-end
-collectTP()
-local function tpNames()
-    local t = {}
-    for n in pairs(TP) do t[#t + 1] = n end
-    table.sort(t)
-    return t
+----------------------------------------------------------------- teleport (hardcoded zone coords + a few live zones)
+local LOCATIONS = {
+    ["Moosewood"]              = Vector3.new(368.20, 140.31, 239.53),
+    ["Roslit Bay"]             = Vector3.new(-1456.52, 149.10, 634.93),
+    ["Sunstone Island"]        = Vector3.new(-953.45, 237.10, -984.76),
+    ["Mushgrove Swamp"]        = Vector3.new(2687.99, 140.72, -731.67),
+    ["Terrapin Island"]        = Vector3.new(-172.42, 149.40, 1954.48),
+    ["Snowcap Island"]         = Vector3.new(2607.62, 143.21, 2396.54),
+    ["Keepars Altar"]          = Vector3.new(1296.20, -792.95, -292.35),
+    ["Desolate Pocket"]        = Vector3.new(-1653.21, -209.57, -2826.66),
+    ["Harvesters Spike"]       = Vector3.new(-1294.44, 239.92, 1561.66),
+    ["Statue of Sovereignty"]  = Vector3.new(-3.60, 428.08, -1120.39),
+    ["Haddock Rock"]           = Vector3.new(-606.35, 212.82, -465.77),
+    ["Earmark Island"]         = Vector3.new(1228.76, 160.95, 504.75),
+    ["The Arch"]               = Vector3.new(1052.07, 321.86, -1249.91),
+    ["Vertigo"]                = Vector3.new(-112.01, -492.90, 1040.33),
+}
+-- pull any live fishing zones too
+pcall(function()
+    local f = workspace:FindFirstChild("zones") and workspace.zones:FindFirstChild("fishing")
+    if f then for _, z in ipairs(f:GetChildren()) do if z:IsA("BasePart") and not LOCATIONS[z.Name] then LOCATIONS[z.Name] = z.Position end end end
+end)
+local function locNames()
+    local t = {} for n in pairs(LOCATIONS) do t[#t + 1] = n end table.sort(t) return t
 end
 local function teleport(name)
-    local pos = TP[name]
+    local pos = LOCATIONS[name]
     local char = plr.Character
-    if pos and char then pcall(function() char:PivotTo(CFrame.new(pos + Vector3.new(0, 6, 0))) end) end
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if pos and hrp then pcall(function() hrp.CFrame = CFrame.new(pos + Vector3.new(0, 5, 0)) end) end
 end
 
 ----------------------------------------------------------------- anti-afk
 plr.Idled:Connect(function()
-    if not CFG.antiAfk then return end
-    pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
+    if CFG.antiAfk then pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end) end
 end)
 
------------------------------------------------------------------ console API (always works)
+----------------------------------------------------------------- console API
 _G.Fisch = {
-    on    = function() CFG.autoFish = true end,
-    off   = function() CFG.autoFish = false end,
-    sell  = sellAll,
-    tp    = teleport,
-    zones = tpNames,
-    cfg   = CFG,
+    on = function() CFG.autoFish = true end,
+    off = function() CFG.autoFish = false end,
+    sell = sellAll, tp = teleport, zones = locNames, cfg = CFG,
+    rod = function() local r = getRod() return r and r.Name or "none" end,
 }
 
 ----------------------------------------------------------------- UI (Fluent — PC + mobile)
 local okUI, Fluent = pcall(function()
     return loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 end)
-
 if okUI and Fluent then
     local Window = Fluent:CreateWindow({
         Title = "Fisch", SubTitle = "Auto-Fisher", TabWidth = 150,
@@ -228,54 +192,37 @@ if okUI and Fluent then
         MinimizeKey = Enum.KeyCode.RightControl,
     })
     local Fishing = Window:AddTab({ Title = "Fishing", Icon = "fish" })
-    local Travel  = Window:AddTab({ Title = "Travel",  Icon = "map" })
-    local Misc    = Window:AddTab({ Title = "Misc",    Icon = "settings" })
+    local Travel  = Window:AddTab({ Title = "Travel", Icon = "map" })
+    local Misc    = Window:AddTab({ Title = "Misc", Icon = "settings" })
 
-    Fishing:AddToggle("AutoFish", { Title = "Auto Fish", Default = false,
-        Callback = function(v) CFG.autoFish = v end })
-    Fishing:AddToggle("PerfectReel", { Title = "Perfect reel", Default = true,
-        Callback = function(v) CFG.perfectReel = v end })
-    Fishing:AddToggle("AutoEquip", { Title = "Auto-equip rod", Default = true,
-        Callback = function(v) CFG.autoEquip = v end })
-    local statusPara = Fishing:AddParagraph({ Title = "Status", Content = "idle" })
+    Fishing:AddToggle("AutoFish", { Title = "Auto Fish", Default = false, Callback = function(v) CFG.autoFish = v end })
+    Fishing:AddSlider("CastType", { Title = "Cast type (try 1 or 2)", Default = 1, Min = 1, Max = 2, Rounding = 0,
+        Callback = function(v) CFG.castType = v end })
+    local st = Fishing:AddParagraph({ Title = "Status", Content = "idle" })
     task.spawn(function()
-        while true do
-            task.wait(0.5)
+        while true do task.wait(0.5)
             pcall(function()
-                statusPara:SetDesc(("Auto Fish: %s | rod: %s | reel: %s | sell: %s")
-                    :format(tostring(CFG.autoFish),
-                        (CurrentTool and isRod(CurrentTool)) and CurrentTool.Name or "none",
-                        ReelFinished and "ok" or "MISSING",
-                        SellAll and "ok" or "MISSING"))
+                st:SetDesc(("Auto: %s | rod: %s | reel remote: %s | sell: %s")
+                    :format(tostring(CFG.autoFish), _G.Fisch.rod(),
+                        ReelFinished and "ok" or "none", SellAll and "ok" or "none"))
             end)
         end
     end)
 
-    local names = tpNames()
+    local names = locNames()
     local chosen = names[1]
-    Travel:AddDropdown("TPTarget", { Title = "Location", Values = names, Multi = false,
-        Default = 1, Callback = function(v) chosen = v end })
+    Travel:AddDropdown("Loc", { Title = "Location", Values = names, Multi = false, Default = 1,
+        Callback = function(v) chosen = v end })
     Travel:AddButton({ Title = "Teleport", Callback = function() if chosen then teleport(chosen) end end })
-    Travel:AddButton({ Title = "Refresh locations", Callback = function()
-        collectTP()
-        Fluent:Notify({ Title = "Fisch", Content = "Locations refreshed (" .. #tpNames() .. ")", Duration = 3 })
-    end })
+    Travel:AddButton({ Title = "Go to Roslit Bay (Orc/Magma quest)", Callback = function() teleport("Roslit Bay") end })
 
-    Misc:AddToggle("AutoSell", { Title = "Auto-sell", Default = false,
-        Callback = function(v) CFG.autoSell = v end })
-    Misc:AddSlider("SellInterval", { Title = "Sell interval (s)", Default = 120, Min = 30, Max = 600,
-        Rounding = 0, Callback = function(v) CFG.sellInterval = v end })
+    Misc:AddToggle("AutoSell", { Title = "Auto-sell", Default = false, Callback = function(v) CFG.autoSell = v end })
     Misc:AddButton({ Title = "Sell now", Callback = function() sellAll() end })
-    Misc:AddToggle("AntiAfk", { Title = "Anti-AFK", Default = true,
-        Callback = function(v) CFG.antiAfk = v end })
+    Misc:AddToggle("AntiAfk", { Title = "Anti-AFK", Default = true, Callback = function(v) CFG.antiAfk = v end })
 
-    Fluent:Notify({ Title = "Fisch", Content = "Loaded. Toggle Auto Fish to start.", Duration = 4 })
+    Fluent:Notify({ Title = "Fisch", Content = "Loaded. Toggle Auto Fish.", Duration = 4 })
 else
-    warn("[Fisch] Fluent UI failed to load — use the console API: _G.Fisch.on()/off()/tp(name)/sell().")
-    pcall(function()
-        game.StarterGui:SetCore("SendNotification", { Title = "Fisch", Text = "UI failed; use _G.Fisch API", Duration = 6 })
-    end)
+    warn("[Fisch] Fluent failed — use _G.Fisch.on()/off()/tp(name)/sell().")
 end
 
-print("[Fisch] loaded. Reel remote: " .. tostring(ReelFinished and ReelFinished.Name)
-    .. " | Sell remote: " .. tostring(SellAll and SellAll.Name) .. " | TP spots: " .. tostring(#tpNames()))
+print("[Fisch] loaded. rod=" .. tostring(_G.Fisch.rod()) .. " reelRemote=" .. tostring(ReelFinished and ReelFinished.Name) .. " sell=" .. tostring(SellAll and SellAll.Name))
